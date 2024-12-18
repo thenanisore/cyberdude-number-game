@@ -6,6 +6,7 @@ import redis
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
+from urllib.parse import urlparse
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -19,7 +20,18 @@ TOKEN = os.getenv('TOKEN')
 REDIS_HOST = os.getenv('REDIS_HOST', 'localhost')
 REDIS_PORT = os.getenv('REDIS_PORT', 6379)
 
-r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
+def setup_redis():
+    if os.environ.get("REDIS_URL"):
+        # Heroku Redis setup
+        url = urlparse(os.environ.get("REDIS_URL"))
+        logger.info(f"Connecting to Heroku Redis at {url.hostname}:{url.port}")
+        return redis.Redis(host=url.hostname, port=url.port, password=url.password, ssl=(url.scheme == "rediss"), ssl_cert_reqs=None)
+    else:
+        # Local Redis setup
+        logger.info(f"Connecting to local Redis at {REDIS_HOST}:{REDIS_PORT}")
+        return redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
+
+r = setup_redis()
 
 # Load current number from Redis or start from 0
 current_number = int(r.get('current_number') or 0)
