@@ -42,12 +42,10 @@ def setup_redis():
 r = setup_redis()
 
 # Load current number from Redis or start from 0
-current_number = int(r.get('current_number') or 0)
-game_channel_id = r.get('game_channel_id')
-
 num_p = re.compile(r'(\d+)!')
 
 PUBLIC_CHANNEL = 0
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Starts the conversation and asks the user to associate a public channel with the current group."""
@@ -134,6 +132,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     """Send a message when the command /help is issued."""
     await update.message.reply_text("Help!")
 
+
 async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Add a number manually."""
 
@@ -166,7 +165,7 @@ async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message with the current stats in the requested format."""
-    last_found_msg = f'💎 Последний найденный номер: {current_number}'
+    last_found_msg = f'💎 Last found number: {current_number}'
 
     # Fetch user stats from Redis
     user_stats_msg = []
@@ -210,27 +209,38 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def submit_number(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Submit a number to be compared with the current number."""
-    global current_number
-    caption = update.message.caption
-    if caption:
-        requested_num = num_p.match(caption.strip())
-        requested_num = int(requested_num.group(1)) if requested_num else None
-        if requested_num and requested_num == current_number + 1:
-            user_id = update.message.from_user.id
-            # Store user submission in Redis set
-            user_key = f"user_submissions:{user_id}"
-            r.sadd(user_key, requested_num)
-            # Store message history in Redis hash
-            message_key = f"message_history:{requested_num}"
-            r.set(message_key, update.message.message_id)
-            # Increment and persist current_number in Redis
-            current_number += 1
-            r.set('current_number', current_number)
+    group_id = update.message.chat_id
+    with LoggerContext(logger, {"group_id": group_id}):
+        caption = update.message.caption
+        logger.info(f"Checking the submitted number, caption: {caption}")
+        if caption:
+            current_number = int(r.get(f"group:{group_id}:current_number"))
+            requested_num = num_p.match(caption.strip())
+            requested_num = int(requested_num.group(1)) if requested_num else None
+            if requested_num and requested_num == current_number + 1:
+                user_id = update.message.from_user.id
+                # Store user submission in Redis set
+                user_key = f"group:{group_id}:user_submissions:{user_id}"
+                r.sadd(user_key, requested_num)
+                # Prepare a message to post in the public channel
+                channel_id = r.get(f"group:{group_id}:channel_id").decode("utf-8")
+                posted_msg = await context.bot.send_photo(
+                    chat_id=channel_id,
+                    photo=update.message.photo[-1],
+                    caption=caption,
+                )
+                # Store message link in message history hash
+                r.hset(f"group:{group_id}:message_history", requested_num, f'{channel_id}:{posted_msg.link}')
+                # Increment and persist current_number
+                current_number += 1
+                r.set(f"group:{group_id}:current_number", current_number)
 
-            await update.message.pin()
-            await update.message.reply_text(f'Нашли номер {requested_num}! 🎉')
+                await update.message.reply_text(f'Found {requested_num}! 🎉 : {posted_msg.link}')
+            else:
+                logger.error(f"The number is incorrect, expected {current_number + 1}, not {requested_num}.")
+                await update.message.reply_text(f'Wrong number! Expected {current_number + 1}, not {requested_num}.')
         else:
-            await update.message.reply_text(f'Неправильный номер! Ищем {current_number + 1}, не {requested_num}.')
+            logger.error(f"The caption is empty for message {update.message.message_id}")
 
 
 def main() -> None:
