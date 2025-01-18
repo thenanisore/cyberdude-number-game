@@ -1,19 +1,27 @@
 import logging
 import os
 import re
+import sys
 import redis
 
 from dotenv import load_dotenv
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram import ReplyKeyboardRemove, Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters, ConversationHandler
 from urllib.parse import urlparse
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
+from log_utils import ContextFilter, LoggerContext
 
+# Set up logging
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
+handler = logging.StreamHandler(stream=sys.stdout)
+handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - [group_id=%(group_id)s] - %(message)s"))
+handler.addFilter(ContextFilter(['group_id']))
+
+logger.addHandler(handler)
+
+# Load environment variables
 load_dotenv()
 
 TOKEN = os.getenv('TOKEN')
@@ -39,15 +47,95 @@ game_channel_id = r.get('game_channel_id')
 
 num_p = re.compile(r'(\d+)!')
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send a message when the command /start is issued."""
-    await update.message.reply_text('Привет! Я бот для поиска номеров. Отправь мне фото или видео с номером, который следует за последним найденным.')
+PUBLIC_CHANNEL = 0
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Starts the conversation and asks the user to associate a public channel with the current group."""
+    group_id = update.message.chat_id
+    with LoggerContext(logger, {"group_id": update.message.chat_id}):
+        # Check if already initialized
+        channel_id = r.get(f"group:{group_id}:channel_id")
+        if channel_id:
+            logger.info(f"The game has already been initialized, ending the conversation.")
+            await update.message.reply_text('The game has already been initialized for this group.')
+            return ConversationHandler.END
+
+        logger.info(f"Starting the initialization for group {group_id}")
+
+        await update.message.reply_text(
+            'Please associate a public channel with this group to start the game.'
+            'The channel will be used to post the submissions.'
+        )
+
+        return PUBLIC_CHANNEL
+
+
+async def is_bot_admin_in_channel(group_id: int, channel_id: str, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Check if the bot has admin permissions in a public channel."""
+    with LoggerContext(logger, {"group_id": group_id}):
+        try:
+            # Check if the bot can send a message to the channel
+            test_message = await context.bot.send_message(
+                chat_id=channel_id,
+                text="Checking admin permissions. This message will self-delete."
+            )
+            # If the message is sent successfully, delete it
+            await test_message.delete()
+            return True
+        except Exception as e:
+            logger.error(f"Bot admin check failed for channel {channel_id}: {e}")
+            return False
+
+
+async def public_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Initialize the game with a public channel for posting submissions."""
+    group_id = update.message.chat_id
+    with LoggerContext(logger, {"group_id": update.message.chat_id}):
+        logger.info(f"Initializing the game")
+
+        channel_id = update.message.text
+
+        # Check if the channel exists and the bot is an admin of the channel
+        try:
+            logger.info(f"Checking the channel {channel_id}")
+            if not channel_id and not channel_id.startswith('@'):
+                raise Exception('The channel name is empty or does not start with @.')
+
+            if not await is_bot_admin_in_channel(group_id, channel_id, context):
+                raise Exception('The bot must be an admin of the channel.')
+        except Exception as e:
+            logger.error(f"Could not init the game: {e}")
+            await update.message.reply_text(f'Could not start the bot: {e}')
+            return ConversationHandler.END
+
+        r.set(f"group:{group_id}:channel_id", channel_id)
+        r.set(f"group:{group_id}:current_number", 0)
+
+        await update.message.reply_text(f'The channel {channel_id} has been associated with this group.')
+
+        return ConversationHandler.END
+
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Cancels and ends the conversation."""
+    group_id = update.message.chat_id
+    with LoggerContext(logger, {"group_id": group_id}):
+        user = update.message.from_user
+
+        logger.info(f"{user.username} canceled the initialization.")
+        await update.message.reply_text(
+            "Initialization cancelled.", reply_markup=ReplyKeyboardRemove()
+        )
+
+        return ConversationHandler.END
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /help is issued."""
     await update.message.reply_text("Help!")
 
+async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Add a number manually."""
 
 # async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 #     """Send a message with the current stats."""
@@ -149,7 +237,16 @@ def main() -> None:
     """Start the bot."""
     app = ApplicationBuilder().token(TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start_command))
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('start', start)],
+        states={
+            PUBLIC_CHANNEL: [MessageHandler(filters.TEXT, public_channel)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)],
+    )
+    app.add_handler(conv_handler)
+
+    app.add_handler(CommandHandler("add", add_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(MessageHandler(
