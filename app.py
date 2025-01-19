@@ -240,7 +240,7 @@ async def help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "✨ To start the game, use the /start command and associate a public channel with the group.\n"
         "✨ The channel will be used to post the submissions.\n"
         '✨ To submit a number, send a photo with the number in the caption. It should look like this: "123!"\n'
-        "✨ To view the current stats, use the /stats command."
+        "✨ To view the current stats, use the /stats and /info commands."
     )
 
 
