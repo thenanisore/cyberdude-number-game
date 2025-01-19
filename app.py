@@ -2,14 +2,15 @@ import logging
 import os
 import re
 import sys
+from typing import Optional
 import redis
 
 from dotenv import load_dotenv
-from telegram import ReplyKeyboardRemove, Update
+from telegram import Message, ReplyKeyboardRemove, Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters, ConversationHandler
 from urllib.parse import urlparse
 
-from log_utils import ContextFilter, LoggerContext
+from log_utils import ContextFilter, MessageContext
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -28,6 +29,7 @@ TOKEN = os.getenv('TOKEN')
 REDIS_HOST = os.getenv('REDIS_HOST', 'localhost')
 REDIS_PORT = os.getenv('REDIS_PORT', 6379)
 
+
 def setup_redis():
     if os.environ.get("REDIS_URL"):
         # Heroku Redis setup
@@ -39,18 +41,17 @@ def setup_redis():
         logger.info(f"Connecting to local Redis at {REDIS_HOST}:{REDIS_PORT}")
         return redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
 
+
 r = setup_redis()
 
-# Load current number from Redis or start from 0
 num_p = re.compile(r'(\d+)!')
 
 PUBLIC_CHANNEL = 0
 
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Starts the conversation and asks the user to associate a public channel with the current group."""
     group_id = update.message.chat_id
-    with LoggerContext(logger, {"group_id": update.message.chat_id}):
+    with MessageContext(logger, {"group_id": update.message.chat_id}):
         # Check if already initialized
         channel_id = r.get(f"group:{group_id}:channel_id")
         if channel_id:
@@ -68,9 +69,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return PUBLIC_CHANNEL
 
 
-async def is_bot_admin_in_channel(group_id: int, channel_id: str, context: ContextTypes.DEFAULT_TYPE) -> bool:
+async def is_bot_admin_in_channel(update: Update, context: ContextTypes.DEFAULT_TYPE, channel_id: str) -> bool:
     """Check if the bot has admin permissions in a public channel."""
-    with LoggerContext(logger, {"group_id": group_id}):
+    with MessageContext(logger, update.message):
         try:
             # Check if the bot can send a message to the channel
             test_message = await context.bot.send_message(
@@ -87,10 +88,10 @@ async def is_bot_admin_in_channel(group_id: int, channel_id: str, context: Conte
 
 async def public_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Initialize the game with a public channel for posting submissions."""
-    group_id = update.message.chat_id
-    with LoggerContext(logger, {"group_id": update.message.chat_id}):
+    with MessageContext(logger, update.message):
         logger.info(f"Initializing the game")
 
+        group_id = update.message.chat_id
         channel_id = update.message.text
 
         # Check if the channel exists and the bot is an admin of the channel
@@ -98,8 +99,7 @@ async def public_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             logger.info(f"Checking the channel {channel_id}")
             if not channel_id and not channel_id.startswith('@'):
                 raise Exception('The channel name is empty or does not start with @.')
-
-            if not await is_bot_admin_in_channel(group_id, channel_id, context):
+            if not await is_bot_admin_in_channel(update.message, context, channel_id):
                 raise Exception('The bot must be an admin of the channel.')
         except Exception as e:
             logger.error(f"Could not init the game: {e}")
@@ -116,8 +116,7 @@ async def public_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Cancels and ends the conversation."""
-    group_id = update.message.chat_id
-    with LoggerContext(logger, {"group_id": group_id}):
+    with MessageContext(logger, update.message):
         user = update.message.from_user
 
         logger.info(f"{user.username} canceled the initialization.")
@@ -131,10 +130,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /help is issued."""
     await update.message.reply_text("Help!")
-
-
-async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Add a number manually."""
 
 
 # async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -208,40 +203,62 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-async def submit_number(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def submit_number(message: Message, context: ContextTypes.DEFAULT_TYPE, requested_num: Optional[int]) -> None:
+    """Submit a number and update the current number if necessary."""
+    with MessageContext(logger, message):
+        current_number = int(r.get(f"group:{message.chat_id}:current_number"))
+        if requested_num and requested_num == current_number + 1:
+            group_id = message.chat_id
+            user_id = message.from_user.id
+            # Store user submission in Redis set
+            user_key = f"group:{group_id}:user_submissions:{user_id}"
+            r.sadd(user_key, requested_num)
+            # Prepare a message to post in the public channel
+            channel_id = r.get(f"group:{group_id}:channel_id").decode("utf-8")
+            posted_msg = await context.bot.send_photo(
+                chat_id=channel_id,
+                photo=message.photo[-1],
+                caption=f"💎 Number {requested_num} submitted by {message.from_user.mention_markdown_v2()} 💎",
+                parse_mode="MarkdownV2"
+            )
+            # Store message link in message history hash
+            r.hset(f"group:{group_id}:message_history", requested_num, f'{channel_id}:{posted_msg.link}')
+            # Increment and persist requested number if it's larger than the current number
+            current_number = int(r.get(f"group:{group_id}:current_number"))
+            if requested_num > current_number:
+                logger.info(f"Updating the current number to {requested_num}, was {current_number}")
+                r.set(f"group:{group_id}:current_number", requested_num)
+
+            await message.reply_markdown_v2(f'🎉 [Found {requested_num}]({posted_msg.link})\\! 🎉')
+        else:
+            logger.error(f"The number is incorrect, expected {current_number + 1}, not {requested_num}.")
+            await message.reply_text(f'Wrong number! Expected {current_number + 1}, not {requested_num}.')
+
+
+async def submit_new_number(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Submit a number to be compared with the current number."""
-    group_id = update.message.chat_id
-    with LoggerContext(logger, {"group_id": group_id}):
+    with MessageContext(logger, update.message):
         caption = update.message.caption
         logger.info(f"Checking the submitted number, caption: {caption}")
         if caption:
-            current_number = int(r.get(f"group:{group_id}:current_number"))
             requested_num = num_p.match(caption.strip())
             requested_num = int(requested_num.group(1)) if requested_num else None
-            if requested_num and requested_num == current_number + 1:
-                user_id = update.message.from_user.id
-                # Store user submission in Redis set
-                user_key = f"group:{group_id}:user_submissions:{user_id}"
-                r.sadd(user_key, requested_num)
-                # Prepare a message to post in the public channel
-                channel_id = r.get(f"group:{group_id}:channel_id").decode("utf-8")
-                posted_msg = await context.bot.send_photo(
-                    chat_id=channel_id,
-                    photo=update.message.photo[-1],
-                    caption=caption,
-                )
-                # Store message link in message history hash
-                r.hset(f"group:{group_id}:message_history", requested_num, f'{channel_id}:{posted_msg.link}')
-                # Increment and persist current_number
-                current_number += 1
-                r.set(f"group:{group_id}:current_number", current_number)
-
-                await update.message.reply_markdown_v2(f'🎉 [Found {requested_num}]({posted_msg.link})\! 🎉')
-            else:
-                logger.error(f"The number is incorrect, expected {current_number + 1}, not {requested_num}.")
-                await update.message.reply_text(f'Wrong number! Expected {current_number + 1}, not {requested_num}.')
+            await submit_number(update.message, context, requested_num)
         else:
             logger.error(f"The caption is empty for message {update.message.message_id}")
+
+
+async def submit_existing_number(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Submit an already posted number."""
+    with MessageContext(logger, update.message):
+        try:
+            number = int(context.args[0])
+            logger.info(f"Trying to sumbit an existing number {number}")
+            await submit_number(update.message.reply_to_message, context, number)
+        except Exception as e:
+            logger.error(f"Could not submit the number: {e}")
+            await update.message.reply_text("Could not submit the number.")
+            return
 
 
 def main() -> None:
@@ -257,12 +274,12 @@ def main() -> None:
     )
     app.add_handler(conv_handler)
 
-    app.add_handler(CommandHandler("add", add_command))
+    app.add_handler(CommandHandler("add", submit_existing_number))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(MessageHandler(
         filters.CAPTION & (filters.PHOTO | filters.VIDEO) & ~filters.COMMAND,
-        submit_number
+        submit_new_number
     ))
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)

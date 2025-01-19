@@ -4,6 +4,8 @@ import contextvars
 import logging
 from typing import List
 
+from telegram import Message
+
 log_context_data = contextvars.ContextVar('log_context_data', default=dict())
 
 class ContextFilter(logging.Filter):
@@ -21,10 +23,12 @@ class ContextFilter(logging.Filter):
         return True
 
 
-class LoggerContext(object):
-    def __init__(self, logger, context: dict = None):
+class MessageContext(object):
+    def __init__(self, logger, message: Message):
         self.logger = logger
-        self.context: dict = context
+        self.context = {
+            'group_id': message.chat.id,
+        }
         self.token = None
 
     def __enter__(self):
