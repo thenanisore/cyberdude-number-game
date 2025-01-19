@@ -51,7 +51,7 @@ PUBLIC_CHANNEL = 0
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Starts the conversation and asks the user to associate a public channel with the current group."""
     group_id = update.message.chat_id
-    with MessageContext(logger, {"group_id": update.message.chat_id}):
+    with MessageContext(logger, update.message):
         # Check if already initialized
         channel_id = r.get(f"group:{group_id}:channel_id")
         if channel_id:
@@ -62,7 +62,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         logger.info(f"Starting the initialization for group {group_id}")
 
         await update.message.reply_text(
-            'Please associate a public channel with this group to start the game.'
+            'Please post the handler of the public channel that will be associated with this group.\n'
             'The channel will be used to post the submissions.'
         )
 
@@ -99,7 +99,7 @@ async def public_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             logger.info(f"Checking the channel {channel_id}")
             if not channel_id and not channel_id.startswith('@'):
                 raise Exception('The channel name is empty or does not start with @.')
-            if not await is_bot_admin_in_channel(update.message, context, channel_id):
+            if not await is_bot_admin_in_channel(update, context, channel_id):
                 raise Exception('The bot must be an admin of the channel.')
         except Exception as e:
             logger.error(f"Could not init the game: {e}")
@@ -143,8 +143,9 @@ async def submit_number(message: Message, context: ContextTypes.DEFAULT_TYPE, re
     group_id = message.chat_id
     with MessageContext(logger, message):
         # Check if the requested number is already submitted
-        already_existing_link = r.hget(f"group:{group_id}:message_history", requested_num).decode("utf-8")
+        already_existing_link = r.hget(f"group:{group_id}:message_history", requested_num)
         if already_existing_link:
+            already_existing_link = already_existing_link.decode("utf-8")
             await message.reply_html(f'Number {requested_num} has already been <a href="{already_existing_link}">submitted</a>!')
             return
         current_number = int(r.get(f"group:{message.chat_id}:current_number"))
@@ -193,7 +194,7 @@ async def submit_existing_number(update: Update, context: ContextTypes.DEFAULT_T
     with MessageContext(logger, update.message):
         try:
             number = int(context.args[0])
-            logger.info(f"Trying to sumbit an existing number {number}")
+            logger.info(f"Trying to sumbit existing number {number}")
             # Check if the message contains a photo or video
             if not update.message.reply_to_message:
                 raise Exception("the message is not a reply.")
@@ -210,6 +211,12 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     group_id = update.message.chat_id
     with MessageContext(logger, update.message):
         try:
+            # Check if the game has been initialized
+            channel_id = r.get(f"group:{group_id}:channel_id")
+            if not channel_id:
+                await update.message.reply_text("The game has not been initialized for this group.")
+                return
+
             # Fetch user stats
             user_stats = []
             for key in r.scan_iter(match=f"group:{group_id}:user_submissions:*"):
@@ -258,12 +265,18 @@ async def info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             # Fetch the current number
             current_number = int(r.get(f"group:{group_id}:current_number"))
             # Fetch the latest submission's link
-            latest_submission_link = r.hget(f"group:{group_id}:message_history", current_number).decode("utf-8")
-
-            await update.message.reply_markdown_v2(
-                f"💎 Last found number is **[{current_number}]({latest_submission_link})**\n\n"
-                f"📢 Group channel: {channel_id}"
-            )
+            latest_submission_link = r.hget(f"group:{group_id}:message_history", current_number)
+            if latest_submission_link:
+                latest_submission_link = latest_submission_link.decode("utf-8")
+                await update.message.reply_markdown_v2(
+                    f"💎 Last found number is **[{current_number}]({latest_submission_link})**\n\n"
+                    f"📢 Group channel: {channel_id}"
+                )
+            else:
+                await update.message.reply_markdown_v2(
+                    f"💎 Current number is {current_number}: no submissions yet\\!\n"
+                    f"📢 Group channel: {channel_id}"
+                )
 
         except Exception as e:
             logger.error(f"Error fetching info: {e}")
