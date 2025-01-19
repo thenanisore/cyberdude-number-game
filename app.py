@@ -201,75 +201,42 @@ async def submit_existing_number(update: Update, context: ContextTypes.DEFAULT_T
             return
 
 
-# async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-#     """Send a message with the current stats."""
-#     last_found_msg = f'Последний найденный номер: {current_number}'
-
-#     # Fetch user stats from Redis
-#     user_stats_msg = []
-#     for user_id in r.scan_iter(match="user_submissions:*"):
-#         user_id_str = user_id.decode("utf-8").split(":")[1]
-#         user_info = await context.bot.get_chat(user_id_str)
-#         username = f"@{user_info.username}" if user_info.username else f"User {user_id_str}"
-#         user_numbers = r.smembers(user_id)
-#         user_numbers = {int(num) for num in user_numbers}  # Convert to set of numbers
-#         total = len(user_numbers)
-#         user_stats_msg.append(f'⭐️ {username}: {total} ({", ".join(map(str, user_numbers))}')
-
-#     # Fetch message history from Redis
-#     message_history_msg = []
-#     for num in r.scan_iter(match="message_history:*"):
-#         num_str = num.decode("utf-8").split(":")[1]
-#         message_id = r.get(num).decode("utf-8")
-#         message_history_msg.append(f'{num_str}: {message_id}')
-
-#     user_stats_msg = "\n".join(user_stats_msg)
-#     message_history_msg = "\n".join(message_history_msg)
-
-#     await update.message.reply_text(f"{last_found_msg}\n\n{user_stats_msg}\n\n{message_history_msg}")
-
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send a message with the current stats in the requested format."""
-    last_found_msg = f'💎 Last found number: {current_number}'
-
-    # Fetch user stats from Redis
-    user_stats_msg = []
-    for user_id in r.scan_iter(match="user_submissions:*"):
-        user_id_str = user_id.decode("utf-8").split(":")[1]
-        user_numbers = r.smembers(user_id)
-        user_numbers = {int(num) for num in user_numbers}  # Convert to set of numbers
-
-        # Get the user's Telegram username (might have changed)
+    group_id = update.message.chat_id
+    with MessageContext(logger, update.message):
         try:
-            user_info = await context.bot.get_chat(user_id_str)
-            username = f"@{user_info.username}" if user_info.username else f"User {user_id_str}"
+            # Fetch user stats
+            user_stats = []
+            for key in r.scan_iter(match=f"group:{group_id}:user_submissions:*"):
+                user_id = key.decode("utf-8").split(":")[3]
+                logger.info(f'Collecting stats for user {user_id}')
+
+                user_numbers = {int(num) for num in r.smembers(key)}
+
+                # Get the user's Telegram username (might have changed)
+                try:
+                    user_info = await context.bot.get_chat(user_id)
+                    username = f"@{user_info.username}" if user_info.username else f"User {user_id}"
+                except Exception as e:
+                    logger.error(f"Could not get the user info for user {user_id}: {e}")
+                    username = f"User {user_id}"  # Fallback if the username can't be retrieved
+
+                # Get the last submitted number and its link
+                last_number = max(user_numbers) if user_numbers else "N/A"
+                last_submission_link = r.hget(f"group:{group_id}:message_history", last_number).decode("utf-8")
+
+                # Add the user's stats
+                user_stats.append(
+                    f'⭐️ <b>{username}</b>: {len(user_numbers)} submissions (latest: <a href="{last_submission_link}">{last_number}</a>)'
+                )
+
+            # Format the stats message and reply
+            user_stats_msg = "\n".join(user_stats) if user_stats else "No submissions yet."
+            await update.message.reply_html(f"📊 Stats by users:\n{user_stats_msg}")
+
         except Exception as e:
-            username = f"User {user_id_str}"  # Fallback if the username can't be retrieved
-
-        # Format user numbers with links to messages
-        user_numbers_with_links = [
-            f"[{num}](https://t.me/{update.message.chat_id}/{r.get(f'message_history:{num}').decode('utf-8')})"
-            for num in sorted(user_numbers)
-        ]
-
-        user_stats_msg.append(
-            f"⭐️ {username}    {len(user_numbers)} ({', '.join(user_numbers_with_links)})"
-        )
-
-    # Fetch message history from Redis
-    message_history_msg = []
-    for num in r.scan_iter(match="message_history:*"):
-        num_str = num.decode("utf-8").split(":")[1]
-        message_id = r.get(num).decode("utf-8")
-        message_history_msg.append(f'{num_str}: [Message](https://t.me/{context.bot.username}/{message_id})')
-
-    user_stats_msg = "\n".join(user_stats_msg)
-    message_history_msg = "\n".join(message_history_msg)
-
-    await update.message.reply_text(
-        f"{last_found_msg}\n\n{user_stats_msg}\n\n{message_history_msg}",
-        parse_mode="Markdown"  # Use Markdown to enable clickable links
-    )
+            logger.error(f"Error fetching stats: {e}")
+            await update.message.reply_text("Could not show stats due to an error.")
 
 
 async def info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -294,9 +261,8 @@ async def info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
 
         except Exception as e:
-            logger.error(f"Could not get the info: {e}")
-            await update.message.reply_text("Could not get the info.")
-            return
+            logger.error(f"Error fetching info: {e}")
+            await update.message.reply_text("Could not show info due to an error.")
 
 
 def main() -> None:
