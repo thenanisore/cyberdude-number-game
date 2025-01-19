@@ -130,11 +130,11 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /help is issued."""
     await update.message.reply_text(
-        'To start the game, use the /start command and associate a public channel with the group.\n'
-        'The channel will be used to post the submissions.\n'
-        'To submit a number, send a photo or video with the number in the caption. It should look like this: "123!"\n'
-        'To submit an existing number, reply to the message with the submission with the /add command followed by the number.\n'
-        'To view the current stats, use the /stats command.'
+        '✨ To start the game, use the /start command and associate a public channel with the group.\n'
+        '✨ The channel will be used to post the submissions.\n'
+        '✨ To submit a number, send a photo or video with the number in the caption. It should look like this: "123!"\n'
+        '✨ To submit an existing number, reply to the message with the submission with the /add command followed by the number.\n'
+        '✨ To view the current stats, use the /stats command.'
     )
 
 
