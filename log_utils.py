@@ -6,12 +6,14 @@ from typing import List
 
 from telegram import Message
 
-log_context_data = contextvars.ContextVar('log_context_data', default=dict())
+log_context_data = contextvars.ContextVar("log_context_data", default=dict())
+
 
 class ContextFilter(logging.Filter):
     """
     This is a filter which injects contextual information from `contextvars.ContextVar` (log_context_data) into the log.
     """
+
     def __init__(self, attributes: List[str]):
         super().__init__()
         self.attributes = attributes
@@ -19,7 +21,7 @@ class ContextFilter(logging.Filter):
     def filter(self, record):
         context_dict = log_context_data.get()
         for a in self.attributes:
-            setattr(record, a, context_dict.get(a, 'None'))
+            setattr(record, a, context_dict.get(a, "None"))
         return True
 
 
@@ -27,7 +29,7 @@ class MessageContext(object):
     def __init__(self, logger, message: Message):
         self.logger = logger
         self.context = {
-            'group_id': message.chat.id,
+            "group_id": message.chat.id,
         }
         self.token = None
 

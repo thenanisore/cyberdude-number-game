@@ -2,13 +2,19 @@ import logging
 import os
 import re
 import sys
-from typing import Optional
-import redis
-
-from dotenv import load_dotenv
-from telegram import Message, ReplyKeyboardRemove, Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters, ConversationHandler
 from urllib.parse import urlparse
+
+import redis
+from dotenv import load_dotenv
+from telegram import ReplyKeyboardRemove, Update
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+    ConversationHandler,
+    MessageHandler,
+    filters,
+)
 
 from log_utils import ContextFilter, MessageContext
 
@@ -17,25 +23,43 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
 handler = logging.StreamHandler(stream=sys.stdout)
-handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - [group_id=%(group_id)s] - %(message)s"))
-handler.addFilter(ContextFilter(['group_id']))
+handler.setFormatter(
+    logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - [group_id=%(group_id)s] - %(message)s"
+    )
+)
+handler.addFilter(ContextFilter(["group_id"]))
 
 logger.addHandler(handler)
 
 # Load environment variables
 load_dotenv()
 
-TOKEN = os.getenv('TOKEN')
-REDIS_HOST = os.getenv('REDIS_HOST', 'localhost')
-REDIS_PORT = os.getenv('REDIS_PORT', 6379)
+# Regex to extract the number from the caption
+num_p = re.compile(r"(\d+)!")
+
+# Conversation state constants
+PUBLIC_CHANNEL = 0
+
+################
+# Redis setup #
+################
 
 
 def setup_redis():
+    REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+    REDIS_PORT = os.getenv("REDIS_PORT", 6379)
     if os.environ.get("REDIS_URL"):
         # Heroku Redis setup
         url = urlparse(os.environ.get("REDIS_URL"))
         logger.info(f"Connecting to Heroku Redis at {url.hostname}:{url.port}")
-        return redis.Redis(host=url.hostname, port=url.port, password=url.password, ssl=(url.scheme == "rediss"), ssl_cert_reqs=None)
+        return redis.Redis(
+            host=url.hostname,
+            port=url.port,
+            password=url.password,
+            ssl=(url.scheme == "rediss"),
+            ssl_cert_reqs=None,
+        )
     else:
         # Local Redis setup
         logger.info(f"Connecting to local Redis at {REDIS_HOST}:{REDIS_PORT}")
@@ -44,9 +68,10 @@ def setup_redis():
 
 r = setup_redis()
 
-num_p = re.compile(r'(\d+)!')
+####################
+# Command handlers #
+####################
 
-PUBLIC_CHANNEL = 0
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Starts the conversation and asks the user to associate a public channel with the current group."""
@@ -55,15 +80,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         # Check if already initialized
         channel_id = r.get(f"group:{group_id}:channel_id")
         if channel_id:
-            logger.info(f"The game has already been initialized, ending the conversation.")
-            await update.message.reply_text('The game has already been initialized for this group.')
+            logger.info(
+                f"The game has already been initialized, ending the conversation."
+            )
+            await update.message.reply_text(
+                "The game has already been initialized for this group."
+            )
             return ConversationHandler.END
 
         logger.info(f"Starting the initialization for group {group_id}")
 
         await update.message.reply_text(
-            'Please post the handler of the public channel that will be associated with this group.\n'
-            'The channel will be used to post the submissions.'
+            "Please post the handler of the public channel that will be associated with this group.\n"
+            "The channel will be used to post the submissions."
         )
 
         return PUBLIC_CHANNEL
@@ -78,20 +107,22 @@ async def check_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> boo
         try:
             # Check permissions
             chat_member = await context.bot.get_chat_member(group_id, user_id)
-            return chat_member.status in ['administrator', 'creator']
+            return chat_member.status in ["administrator", "creator"]
         except Exception as e:
             logger.error(f"Error checking admin permissions: {e}")
             return False
 
 
-async def is_bot_admin_in_channel(update: Update, context: ContextTypes.DEFAULT_TYPE, channel_id: str) -> bool:
+async def is_bot_admin_in_channel(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, channel_id: str
+) -> bool:
     """Check if the bot has admin permissions in a public channel."""
     with MessageContext(logger, update.message):
         try:
             # Check if the bot can send a message to the channel
             test_message = await context.bot.send_message(
                 chat_id=channel_id,
-                text="Checking admin permissions. This message will self-delete."
+                text="Checking admin permissions. This message will self-delete.",
             )
             # If the message is sent successfully, delete it
             await test_message.delete()
@@ -112,19 +143,21 @@ async def public_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Check if the channel exists and the bot is an admin of the channel
         try:
             logger.info(f"Checking the channel {channel_id}")
-            if not channel_id and not channel_id.startswith('@'):
-                raise Exception('The channel name is empty or does not start with @.')
+            if not channel_id and not channel_id.startswith("@"):
+                raise Exception("The channel name is empty or does not start with @.")
             if not await is_bot_admin_in_channel(update, context, channel_id):
-                raise Exception('The bot must be an admin of the channel.')
+                raise Exception("The bot must be an admin of the channel.")
         except Exception as e:
             logger.error(f"Could not init the game: {e}")
-            await update.message.reply_text(f'Could not start the bot: {e}')
+            await update.message.reply_text(f"Could not start the bot: {e}")
             return ConversationHandler.END
 
         r.set(f"group:{group_id}:channel_id", channel_id)
         r.set(f"group:{group_id}:current_number", 1)
 
-        await update.message.reply_text(f'The channel {channel_id} has been associated with this group.')
+        await update.message.reply_text(
+            f"The channel {channel_id} has been associated with this group."
+        )
 
         return ConversationHandler.END
 
@@ -145,10 +178,10 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /help is issued."""
     await update.message.reply_text(
-        '✨ To start the game, use the /start command and associate a public channel with the group.\n'
-        '✨ The channel will be used to post the submissions.\n'
+        "✨ To start the game, use the /start command and associate a public channel with the group.\n"
+        "✨ The channel will be used to post the submissions.\n"
         '✨ To submit a number, send a photo with the number in the caption. It should look like this: "123!"\n'
-        '✨ To view the current stats, use the /stats command.'
+        "✨ To view the current stats, use the /stats command."
     )
 
 
@@ -166,14 +199,18 @@ async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             already_existing_link = r.hget(f"group:{group_id}:message_history", number)
             if already_existing_link:
                 already_existing_link = already_existing_link.decode("utf-8")
-                await update.message.reply_html(f'Number {number} has already been <a href="{already_existing_link}">submitted</a>!')
+                await update.message.reply_html(
+                    f'Number {number} has already been <a href="{already_existing_link}">submitted</a>!'
+                )
                 return
 
             # Check if the number is correct
             current_number = int(r.get(f"group:{group_id}:current_number"))
             if number and number == current_number + 1:
                 # Store user submission in Redis set
-                user_key = f"group:{group_id}:user_submissions:{update.message.from_user.id}"
+                user_key = (
+                    f"group:{group_id}:user_submissions:{update.message.from_user.id}"
+                )
                 r.sadd(user_key, number)
                 # Prepare a message to post in the public channel
                 channel_id = r.get(f"group:{group_id}:channel_id").decode("utf-8")
@@ -181,20 +218,32 @@ async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     chat_id=channel_id,
                     photo=update.message.photo[-1],
                     caption=f"💎 Number {number} submitted by {update.message.from_user.mention_markdown_v2()} 💎",
-                    parse_mode="MarkdownV2"
+                    parse_mode="MarkdownV2",
                 )
                 # Store message link in message history hash
-                r.hset(f"group:{group_id}:message_history", number, f'{posted_msg.link}')
+                r.hset(
+                    f"group:{group_id}:message_history", number, f"{posted_msg.link}"
+                )
                 # Increment and persist requested number if it's larger than the current number
-                logger.info(f"Updating the current number to {number}, was {current_number}")
+                logger.info(
+                    f"Updating the current number to {number}, was {current_number}"
+                )
                 r.set(f"group:{group_id}:current_number", number)
 
-                await update.message.reply_markdown_v2(f'🎉 [Found {number}]({posted_msg.link})\\! 🎉')
+                await update.message.reply_markdown_v2(
+                    f"🎉 [Found {number}]({posted_msg.link})\\! 🎉"
+                )
             else:
-                logger.error(f"The number is incorrect, expected {current_number + 1}, not {number}.")
-                await update.message.reply_text(f'Wrong number! Expected {current_number + 1}, not {number}.')
+                logger.error(
+                    f"The number is incorrect, expected {current_number + 1}, not {number}."
+                )
+                await update.message.reply_text(
+                    f"Wrong number! Expected {current_number + 1}, not {number}."
+                )
         else:
-            logger.error(f"The caption is empty for message {update.message.message_id}")
+            logger.error(
+                f"The caption is empty for message {update.message.message_id}"
+            )
 
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -204,28 +253,38 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             # Check if the game has been initialized
             channel_id = r.get(f"group:{group_id}:channel_id")
             if not channel_id:
-                await update.message.reply_text("The game has not been initialized for this group.")
+                await update.message.reply_text(
+                    "The game has not been initialized for this group."
+                )
                 return
 
             # Fetch user stats
             user_stats = []
             for key in r.scan_iter(match=f"group:{group_id}:user_submissions:*"):
                 user_id = key.decode("utf-8").split(":")[3]
-                logger.info(f'Collecting stats for user {user_id}')
+                logger.info(f"Collecting stats for user {user_id}")
 
                 user_numbers = {int(num) for num in r.smembers(key)}
 
                 # Get the user's Telegram username (might have changed)
                 try:
                     user_info = await context.bot.get_chat(user_id)
-                    username = f"@{user_info.username}" if user_info.username else f"User {user_id}"
+                    username = (
+                        f"@{user_info.username}"
+                        if user_info.username
+                        else f"User {user_id}"
+                    )
                 except Exception as e:
                     logger.error(f"Could not get the user info for user {user_id}: {e}")
-                    username = f"User {user_id}"  # Fallback if the username can't be retrieved
+                    username = (
+                        f"User {user_id}"  # Fallback if the username can't be retrieved
+                    )
 
                 # Get the last submitted number and its link
                 last_number = max(user_numbers) if user_numbers else "N/A"
-                last_submission_link = r.hget(f"group:{group_id}:message_history", last_number).decode("utf-8")
+                last_submission_link = r.hget(
+                    f"group:{group_id}:message_history", last_number
+                ).decode("utf-8")
 
                 # Add the user's stats
                 user_stats.append(
@@ -233,7 +292,9 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
 
             # Format the stats message and reply
-            user_stats_msg = "\n".join(user_stats) if user_stats else "No submissions yet."
+            user_stats_msg = (
+                "\n".join(user_stats) if user_stats else "No submissions yet."
+            )
             await update.message.reply_html(f"📊 Stats by users:\n{user_stats_msg}")
 
         except Exception as e:
@@ -249,13 +310,17 @@ async def info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             # Fetch the associated public channel
             channel_id = r.get(f"group:{group_id}:channel_id")
             if not channel_id:
-                await update.message.reply_text("The game has not been initialized for this group.")
+                await update.message.reply_text(
+                    "The game has not been initialized for this group."
+                )
                 return
             channel_id = channel_id.decode("utf-8")
             # Fetch the current number
             current_number = int(r.get(f"group:{group_id}:current_number"))
             # Fetch the latest submission's link
-            latest_submission_link = r.hget(f"group:{group_id}:message_history", current_number)
+            latest_submission_link = r.hget(
+                f"group:{group_id}:message_history", current_number
+            )
             if latest_submission_link:
                 latest_submission_link = latest_submission_link.decode("utf-8")
                 await update.message.reply_markdown_v2(
@@ -281,8 +346,12 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             # Check permissions
             if not await check_admin(update, context):
-                logger.warning(f"User {user_id} attempted to reset without sufficient permissions.")
-                await update.message.reply_text("You must be an admin to reset the game.")
+                logger.warning(
+                    f"User {user_id} attempted to reset without sufficient permissions."
+                )
+                await update.message.reply_text(
+                    "You must be an admin to reset the game."
+                )
                 return
 
             logger.info(f"Resetting the game for group {group_id} by user {user_id}.")
@@ -303,14 +372,15 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 def main() -> None:
     """Start the bot."""
+    TOKEN = os.getenv("TOKEN")
     app = ApplicationBuilder().token(TOKEN).build()
 
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('start', start)],
+        entry_points=[CommandHandler("start", start)],
         states={
             PUBLIC_CHANNEL: [MessageHandler(filters.TEXT, public_channel)],
         },
-        fallbacks=[CommandHandler('cancel', cancel)],
+        fallbacks=[CommandHandler("cancel", cancel)],
     )
     app.add_handler(conv_handler)
 
@@ -318,10 +388,9 @@ def main() -> None:
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("info", info))
     app.add_handler(CommandHandler("reset", reset))
-    app.add_handler(MessageHandler(
-        filters.CAPTION & filters.PHOTO & ~filters.COMMAND,
-        submit
-    ))
+    app.add_handler(
+        MessageHandler(filters.CAPTION & filters.PHOTO & ~filters.COMMAND, submit)
+    )
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
