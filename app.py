@@ -107,7 +107,7 @@ async def public_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return ConversationHandler.END
 
         r.set(f"group:{group_id}:channel_id", channel_id)
-        r.set(f"group:{group_id}:current_number", 0)
+        r.set(f"group:{group_id}:current_number", 1)
 
         await update.message.reply_text(f'The channel {channel_id} has been associated with this group.')
 
