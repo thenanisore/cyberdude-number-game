@@ -69,6 +69,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return PUBLIC_CHANNEL
 
 
+async def check_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Check if the user is an admin."""
+    group_id = update.message.chat_id
+    user_id = update.message.from_user.id
+
+    with MessageContext(logger, update.message):
+        try:
+            # Check permissions
+            chat_member = await context.bot.get_chat_member(group_id, user_id)
+            return chat_member.status in ['administrator', 'creator']
+        except Exception as e:
+            logger.error(f"Error checking admin permissions: {e}")
+            return False
+
+
 async def is_bot_admin_in_channel(update: Update, context: ContextTypes.DEFAULT_TYPE, channel_id: str) -> bool:
     """Check if the bot has admin permissions in a public channel."""
     with MessageContext(logger, update.message):
@@ -132,79 +147,54 @@ async def help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         '✨ To start the game, use the /start command and associate a public channel with the group.\n'
         '✨ The channel will be used to post the submissions.\n'
-        '✨ To submit a number, send a photo or video with the number in the caption. It should look like this: "123!"\n'
-        '✨ To submit an existing number, reply to the message with the submission with the /add command followed by the number.\n'
+        '✨ To submit a number, send a photo with the number in the caption. It should look like this: "123!"\n'
         '✨ To view the current stats, use the /stats command.'
     )
 
 
-async def submit_number(message: Message, context: ContextTypes.DEFAULT_TYPE, requested_num: Optional[int], user_id: str) -> None:
-    """Submit a number and update the current number if necessary."""
-    group_id = message.chat_id
-    with MessageContext(logger, message):
-        # Check if the requested number is already submitted
-        already_existing_link = r.hget(f"group:{group_id}:message_history", requested_num)
-        if already_existing_link:
-            already_existing_link = already_existing_link.decode("utf-8")
-            await message.reply_html(f'Number {requested_num} has already been <a href="{already_existing_link}">submitted</a>!')
-            return
-        current_number = int(r.get(f"group:{message.chat_id}:current_number"))
-        if requested_num and requested_num == current_number + 1:
-            # Store user submission in Redis set
-            user_key = f"group:{group_id}:user_submissions:{user_id}"
-            r.sadd(user_key, requested_num)
-            # Prepare a message to post in the public channel
-            channel_id = r.get(f"group:{group_id}:channel_id").decode("utf-8")
-            posted_msg = await context.bot.send_photo(
-                chat_id=channel_id,
-                photo=message.photo[-1],
-                caption=f"💎 Number {requested_num} submitted by {message.from_user.mention_markdown_v2()} 💎",
-                parse_mode="MarkdownV2"
-            )
-            # Store message link in message history hash
-            r.hset(f"group:{group_id}:message_history", requested_num, f'{posted_msg.link}')
-            # Increment and persist requested number if it's larger than the current number
-            current_number = int(r.get(f"group:{group_id}:current_number"))
-            if requested_num > current_number:
-                logger.info(f"Updating the current number to {requested_num}, was {current_number}")
-                r.set(f"group:{group_id}:current_number", requested_num)
-
-            await message.reply_markdown_v2(f'🎉 [Found {requested_num}]({posted_msg.link})\\! 🎉')
-        else:
-            logger.error(f"The number is incorrect, expected {current_number + 1}, not {requested_num}.")
-            await message.reply_text(f'Wrong number! Expected {current_number + 1}, not {requested_num}.')
-
-
-async def submit_new_number(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Submit a number to be compared with the current number."""
+    group_id = update.message.chat_id
     with MessageContext(logger, update.message):
         caption = update.message.caption
         logger.info(f"Checking the submitted number, caption: {caption}")
         if caption:
-            requested_num = num_p.match(caption.strip())
-            requested_num = int(requested_num.group(1)) if requested_num else None
-            await submit_number(update.message, context, requested_num, update.message.from_user.id)
+            number_str = num_p.match(caption.strip())
+            number = int(number_str.group(1)) if number_str else None
+
+            # Check if the requested number is already submitted
+            already_existing_link = r.hget(f"group:{group_id}:message_history", number)
+            if already_existing_link:
+                already_existing_link = already_existing_link.decode("utf-8")
+                await update.message.reply_html(f'Number {number} has already been <a href="{already_existing_link}">submitted</a>!')
+                return
+
+            # Check if the number is correct
+            current_number = int(r.get(f"group:{group_id}:current_number"))
+            if number and number == current_number + 1:
+                # Store user submission in Redis set
+                user_key = f"group:{group_id}:user_submissions:{update.message.from_user.id}"
+                r.sadd(user_key, number)
+                # Prepare a message to post in the public channel
+                channel_id = r.get(f"group:{group_id}:channel_id").decode("utf-8")
+                posted_msg = await context.bot.send_photo(
+                    chat_id=channel_id,
+                    photo=update.message.photo[-1],
+                    caption=f"💎 Number {number} submitted by {update.message.from_user.mention_markdown_v2()} 💎",
+                    parse_mode="MarkdownV2"
+                )
+                # Store message link in message history hash
+                r.hset(f"group:{group_id}:message_history", number, f'{posted_msg.link}')
+                # Increment and persist requested number if it's larger than the current number
+                logger.info(f"Updating the current number to {number}, was {current_number}")
+                r.set(f"group:{group_id}:current_number", number)
+
+                await update.message.reply_markdown_v2(f'🎉 [Found {number}]({posted_msg.link})\\! 🎉')
+            else:
+                logger.error(f"The number is incorrect, expected {current_number + 1}, not {number}.")
+                await update.message.reply_text(f'Wrong number! Expected {current_number + 1}, not {number}.')
         else:
             logger.error(f"The caption is empty for message {update.message.message_id}")
-
-
-async def submit_existing_number(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Submit an already posted number."""
-    with MessageContext(logger, update.message):
-        try:
-            number = int(context.args[0])
-            original_user = context.args[1]
-            logger.info(f"Trying to sumbit existing number {number}")
-            # Check if the message contains a photo or video
-            if not update.message.reply_to_message:
-                raise Exception("the message is not a reply.")
-            if not update.message.reply_to_message.photo:
-                raise Exception("the message does not contain a photo.")
-            await submit_number(update.message.reply_to_message, context, number)
-        except Exception as e:
-            logger.error(f"Could not submit the number: {e}")
-            await update.message.reply_text(f"Could not submit the number: {e}")
-            return
 
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -290,8 +280,7 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     with MessageContext(logger, update.message):
         try:
             # Check permissions
-            chat_member = await context.bot.get_chat_member(group_id, user_id)
-            if chat_member.status not in ['administrator', 'creator']:
+            if not await check_admin(update, context):
                 logger.warning(f"User {user_id} attempted to reset without sufficient permissions.")
                 await update.message.reply_text("You must be an admin to reset the game.")
                 return
@@ -325,14 +314,13 @@ def main() -> None:
     )
     app.add_handler(conv_handler)
 
-    app.add_handler(CommandHandler("add", submit_existing_number))
     app.add_handler(CommandHandler("help", help))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("info", info))
     app.add_handler(CommandHandler("reset", reset))
     app.add_handler(MessageHandler(
         filters.CAPTION & filters.PHOTO & ~filters.COMMAND,
-        submit_new_number
+        submit
     ))
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
