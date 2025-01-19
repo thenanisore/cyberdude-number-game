@@ -358,7 +358,9 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             user_stats_msg = (
                 "\n".join(user_stats) if user_stats else "No submissions yet."
             )
-            await update.message.reply_html(f"📊 Stats by users:\n{user_stats_msg}")
+            await update.message.reply_html(
+                f"📊 Stats by users:\n{user_stats_msg}", disable_web_page_preview=True
+            )
 
         except Exception as e:
             logger.error("Error fetching stats: %s", e)
