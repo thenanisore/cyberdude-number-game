@@ -136,6 +136,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Add a number manually."""
 
+
 # async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 #     """Send a message with the current stats."""
 #     last_found_msg = f'Последний найденный номер: {current_number}'
@@ -235,7 +236,7 @@ async def submit_number(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 current_number += 1
                 r.set(f"group:{group_id}:current_number", current_number)
 
-                await update.message.reply_text(f'Found {requested_num}! 🎉 : {posted_msg.link}')
+                await update.message.reply_markdown_v2(f'🎉 [Found {requested_num}]({posted_msg.link})\! 🎉')
             else:
                 logger.error(f"The number is incorrect, expected {current_number + 1}, not {requested_num}.")
                 await update.message.reply_text(f'Wrong number! Expected {current_number + 1}, not {requested_num}.')
