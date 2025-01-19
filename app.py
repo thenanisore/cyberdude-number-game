@@ -2,7 +2,7 @@ import logging
 import os
 import re
 import sys
-from typing import Generator, Optional, Set
+from typing import Generator, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 import redis
@@ -234,7 +234,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return ConversationHandler.END
 
 
-async def help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /help is issued."""
     await update.message.reply_text(
         "✨ To start the game, use the /start command and associate a public channel with the group.\n"
@@ -323,7 +323,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 return
 
             # Fetch user stats
-            user_stats = []
+            user_stats: List[Tuple[int, str]] = []
             for user_id, user_numbers in game_state.get_all_user_submissions(group_id):
                 logger.info("Collecting stats for user %s", user_id)
 
@@ -350,13 +350,22 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
 
                 # Add the user's stats
+                user_score = len(user_numbers)
                 user_stats.append(
-                    f'⭐️ <b>{username}</b>: {len(user_numbers)} submissions (latest: <a href="{last_submission_link}">{last_number}</a>)'
+                    (
+                        user_score,
+                        f'⭐️ <b>{username}</b>: {user_score} submissions (latest: <a href="{last_submission_link}">{last_number}</a>)',
+                    )
                 )
+
+            # Sort the stats by the number of submissions
+            sorted_stats = [
+                x[1] for x in sorted(user_stats, key=lambda x: x[0], reverse=True)
+            ]
 
             # Format the stats message and reply
             user_stats_msg = (
-                "\n".join(user_stats) if user_stats else "No submissions yet."
+                "\n".join(sorted_stats) if sorted_stats else "No submissions yet."
             )
             await update.message.reply_html(
                 f"📊 Stats by users:\n{user_stats_msg}", disable_web_page_preview=True
@@ -445,7 +454,7 @@ def main() -> None:
     )
     app.add_handler(conv_handler)
 
-    app.add_handler(CommandHandler("help", help))
+    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("info", info))
     app.add_handler(CommandHandler("reset", reset))
