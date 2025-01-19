@@ -140,10 +140,15 @@ async def help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def submit_number(message: Message, context: ContextTypes.DEFAULT_TYPE, requested_num: Optional[int]) -> None:
     """Submit a number and update the current number if necessary."""
+    group_id = message.chat_id
     with MessageContext(logger, message):
+        # Check if the requested number is already submitted
+        already_existing_link = r.hget(f"group:{group_id}:message_history", requested_num).decode("utf-8")
+        if already_existing_link:
+            await message.reply_html(f'Number {requested_num} has already been <a href="{already_existing_link}">submitted</a>!')
+            return
         current_number = int(r.get(f"group:{message.chat_id}:current_number"))
         if requested_num and requested_num == current_number + 1:
-            group_id = message.chat_id
             user_id = message.from_user.id
             # Store user submission in Redis set
             user_key = f"group:{group_id}:user_submissions:{user_id}"
@@ -265,6 +270,35 @@ async def info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text("Could not show info due to an error.")
 
 
+async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    group_id = update.message.chat_id
+    user_id = update.message.from_user.id
+
+    with MessageContext(logger, update.message):
+        try:
+            # Check permissions
+            chat_member = await context.bot.get_chat_member(group_id, user_id)
+            if chat_member.status not in ['administrator', 'creator']:
+                logger.warning(f"User {user_id} attempted to reset without sufficient permissions.")
+                await update.message.reply_text("You must be an admin to reset the game.")
+                return
+
+            logger.info(f"Resetting the game for group {group_id} by user {user_id}.")
+
+            # Clear Redis keys for the group
+            r.delete(f"group:{group_id}:current_number")
+            r.delete(f"group:{group_id}:channel_id")
+            for key in r.scan_iter(match=f"group:{group_id}:user_submissions:*"):
+                r.delete(key)
+            r.delete(f"group:{group_id}:message_history")
+
+            await update.message.reply_text("Game has been reset for this group.")
+
+        except Exception as e:
+            logger.error(f"Error resetting the game: {e}")
+            await update.message.reply_text("Could not reset the game due to an error.")
+
+
 def main() -> None:
     """Start the bot."""
     app = ApplicationBuilder().token(TOKEN).build()
@@ -282,6 +316,7 @@ def main() -> None:
     app.add_handler(CommandHandler("help", help))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("info", info))
+    app.add_handler(CommandHandler("reset", reset))
     app.add_handler(MessageHandler(
         filters.CAPTION & filters.PHOTO & ~filters.COMMAND,
         submit_new_number
