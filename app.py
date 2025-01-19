@@ -127,9 +127,78 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return ConversationHandler.END
 
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /help is issued."""
-    await update.message.reply_text("Help!")
+    await update.message.reply_text(
+        'To start the game, use the /start command and associate a public channel with the group.\n'
+        'The channel will be used to post the submissions.\n'
+        'To submit a number, send a photo or video with the number in the caption. It should look like this: "123!"\n'
+        'To submit an existing number, reply to the message with the submission with the /add command followed by the number.\n'
+        'To view the current stats, use the /stats command.'
+    )
+
+
+async def submit_number(message: Message, context: ContextTypes.DEFAULT_TYPE, requested_num: Optional[int]) -> None:
+    """Submit a number and update the current number if necessary."""
+    with MessageContext(logger, message):
+        current_number = int(r.get(f"group:{message.chat_id}:current_number"))
+        if requested_num and requested_num == current_number + 1:
+            group_id = message.chat_id
+            user_id = message.from_user.id
+            # Store user submission in Redis set
+            user_key = f"group:{group_id}:user_submissions:{user_id}"
+            r.sadd(user_key, requested_num)
+            # Prepare a message to post in the public channel
+            channel_id = r.get(f"group:{group_id}:channel_id").decode("utf-8")
+            posted_msg = await context.bot.send_photo(
+                chat_id=channel_id,
+                photo=message.photo[-1],
+                caption=f"💎 Number {requested_num} submitted by {message.from_user.mention_markdown_v2()} 💎",
+                parse_mode="MarkdownV2"
+            )
+            # Store message link in message history hash
+            r.hset(f"group:{group_id}:message_history", requested_num, f'{posted_msg.link}')
+            # Increment and persist requested number if it's larger than the current number
+            current_number = int(r.get(f"group:{group_id}:current_number"))
+            if requested_num > current_number:
+                logger.info(f"Updating the current number to {requested_num}, was {current_number}")
+                r.set(f"group:{group_id}:current_number", requested_num)
+
+            await message.reply_markdown_v2(f'🎉 [Found {requested_num}]({posted_msg.link})\\! 🎉')
+        else:
+            logger.error(f"The number is incorrect, expected {current_number + 1}, not {requested_num}.")
+            await message.reply_text(f'Wrong number! Expected {current_number + 1}, not {requested_num}.')
+
+
+async def submit_new_number(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Submit a number to be compared with the current number."""
+    with MessageContext(logger, update.message):
+        caption = update.message.caption
+        logger.info(f"Checking the submitted number, caption: {caption}")
+        if caption:
+            requested_num = num_p.match(caption.strip())
+            requested_num = int(requested_num.group(1)) if requested_num else None
+            await submit_number(update.message, context, requested_num)
+        else:
+            logger.error(f"The caption is empty for message {update.message.message_id}")
+
+
+async def submit_existing_number(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Submit an already posted number."""
+    with MessageContext(logger, update.message):
+        try:
+            number = int(context.args[0])
+            logger.info(f"Trying to sumbit an existing number {number}")
+            # Check if the message contains a photo or video
+            if not update.message.reply_to_message:
+                raise Exception("the message is not a reply.")
+            if not update.message.reply_to_message.photo:
+                raise Exception("the message does not contain a photo.")
+            await submit_number(update.message.reply_to_message, context, number)
+        except Exception as e:
+            logger.error(f"Could not submit the number: {e}")
+            await update.message.reply_text(f"Could not submit the number: {e}")
+            return
 
 
 # async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -203,61 +272,30 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-async def submit_number(message: Message, context: ContextTypes.DEFAULT_TYPE, requested_num: Optional[int]) -> None:
-    """Submit a number and update the current number if necessary."""
-    with MessageContext(logger, message):
-        current_number = int(r.get(f"group:{message.chat_id}:current_number"))
-        if requested_num and requested_num == current_number + 1:
-            group_id = message.chat_id
-            user_id = message.from_user.id
-            # Store user submission in Redis set
-            user_key = f"group:{group_id}:user_submissions:{user_id}"
-            r.sadd(user_key, requested_num)
-            # Prepare a message to post in the public channel
-            channel_id = r.get(f"group:{group_id}:channel_id").decode("utf-8")
-            posted_msg = await context.bot.send_photo(
-                chat_id=channel_id,
-                photo=message.photo[-1],
-                caption=f"💎 Number {requested_num} submitted by {message.from_user.mention_markdown_v2()} 💎",
-                parse_mode="MarkdownV2"
-            )
-            # Store message link in message history hash
-            r.hset(f"group:{group_id}:message_history", requested_num, f'{channel_id}:{posted_msg.link}')
-            # Increment and persist requested number if it's larger than the current number
-            current_number = int(r.get(f"group:{group_id}:current_number"))
-            if requested_num > current_number:
-                logger.info(f"Updating the current number to {requested_num}, was {current_number}")
-                r.set(f"group:{group_id}:current_number", requested_num)
-
-            await message.reply_markdown_v2(f'🎉 [Found {requested_num}]({posted_msg.link})\\! 🎉')
-        else:
-            logger.error(f"The number is incorrect, expected {current_number + 1}, not {requested_num}.")
-            await message.reply_text(f'Wrong number! Expected {current_number + 1}, not {requested_num}.')
-
-
-async def submit_new_number(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Submit a number to be compared with the current number."""
-    with MessageContext(logger, update.message):
-        caption = update.message.caption
-        logger.info(f"Checking the submitted number, caption: {caption}")
-        if caption:
-            requested_num = num_p.match(caption.strip())
-            requested_num = int(requested_num.group(1)) if requested_num else None
-            await submit_number(update.message, context, requested_num)
-        else:
-            logger.error(f"The caption is empty for message {update.message.message_id}")
-
-
-async def submit_existing_number(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Submit an already posted number."""
+async def info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Display the current number, who found it, and the associated channel."""
+    group_id = update.message.chat_id
     with MessageContext(logger, update.message):
         try:
-            number = int(context.args[0])
-            logger.info(f"Trying to sumbit an existing number {number}")
-            await submit_number(update.message.reply_to_message, context, number)
+            # Fetch the associated public channel
+            channel_id = r.get(f"group:{group_id}:channel_id")
+            if not channel_id:
+                await update.message.reply_text("The game has not been initialized for this group.")
+                return
+            channel_id = channel_id.decode("utf-8")
+            # Fetch the current number
+            current_number = int(r.get(f"group:{group_id}:current_number"))
+            # Fetch the latest submission's link
+            latest_submission_link = r.hget(f"group:{group_id}:message_history", current_number).decode("utf-8")
+
+            await update.message.reply_markdown_v2(
+                f"💎 Last found number is **[{current_number}]({latest_submission_link})**\n\n"
+                f"📢 Group channel: {channel_id}"
+            )
+
         except Exception as e:
-            logger.error(f"Could not submit the number: {e}")
-            await update.message.reply_text("Could not submit the number.")
+            logger.error(f"Could not get the info: {e}")
+            await update.message.reply_text("Could not get the info.")
             return
 
 
@@ -275,10 +313,11 @@ def main() -> None:
     app.add_handler(conv_handler)
 
     app.add_handler(CommandHandler("add", submit_existing_number))
-    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("help", help))
     app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("info", info))
     app.add_handler(MessageHandler(
-        filters.CAPTION & (filters.PHOTO | filters.VIDEO) & ~filters.COMMAND,
+        filters.CAPTION & filters.PHOTO & ~filters.COMMAND,
         submit_new_number
     ))
 
