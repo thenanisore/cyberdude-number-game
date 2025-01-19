@@ -2,6 +2,7 @@ import logging
 import os
 import re
 import sys
+from typing import Generator, Optional, Set
 from urllib.parse import urlparse
 
 import redis
@@ -16,7 +17,7 @@ from telegram.ext import (
     filters,
 )
 
-from log_utils import ContextFilter, MessageContext
+from logutils import ContextFilter, MessageContext
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -41,32 +42,90 @@ num_p = re.compile(r"(\d+)!")
 # Conversation state constants
 PUBLIC_CHANNEL = 0
 
+
 ################
 # Redis setup #
 ################
 
 
-def setup_redis():
-    REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-    REDIS_PORT = os.getenv("REDIS_PORT", 6379)
-    if os.environ.get("REDIS_URL"):
-        # Heroku Redis setup
-        url = urlparse(os.environ.get("REDIS_URL"))
-        logger.info(f"Connecting to Heroku Redis at {url.hostname}:{url.port}")
-        return redis.Redis(
-            host=url.hostname,
-            port=url.port,
-            password=url.password,
-            ssl=(url.scheme == "rediss"),
-            ssl_cert_reqs=None,
-        )
-    else:
-        # Local Redis setup
-        logger.info(f"Connecting to local Redis at {REDIS_HOST}:{REDIS_PORT}")
-        return redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
+class GameState:
+    """Class to manage the game state in Redis."""
+
+    def __init__(self):
+        redis_host = os.getenv("REDIS_HOST", "localhost")
+        redis_post = os.getenv("REDIS_PORT", 6379)
+        if os.environ.get("REDIS_URL"):
+            # Heroku Redis setup
+            url = urlparse(os.environ.get("REDIS_URL"))
+            logger.info("Connecting to Heroku Redis at %s:%s", url.hostname, url.port)
+            self.redis = redis.Redis(
+                host=url.hostname,
+                port=url.port,
+                password=url.password,
+                ssl=(url.scheme == "rediss"),
+                ssl_cert_reqs=None,
+            )
+        else:
+            # Local Redis setup
+            logger.info("Connecting to local Redis at %s:%s", redis_host, redis_post)
+            self.redis = redis.Redis(host=redis_host, port=redis_post, db=0)
+
+    def get_current_number(self, group_id) -> Optional[int]:
+        number = self.redis.get(f"group:{group_id}:current_number")
+        if number:
+            return int(number)
+        return None
+
+    def set_current_number(self, group_id, number) -> None:
+        self.redis.set(f"group:{group_id}:current_number", number)
+
+    def get_channel_id(self, group_id) -> Optional[str]:
+        channel_id = self.redis.get(f"group:{group_id}:channel_id")
+        if channel_id:
+            return channel_id.decode("utf-8")
+        return None
+
+    def set_channel_id(self, group_id, channel_id) -> None:
+        self.redis.set(f"group:{group_id}:channel_id", channel_id)
+
+    def get_submission_link(self, group_id, number) -> Optional[str]:
+        link = self.redis.hget(f"group:{group_id}:message_history", number)
+        if link:
+            return link.decode("utf-8")
+        return None
+
+    def set_submission_link(self, group_id, number, link) -> None:
+        self.redis.hset(f"group:{group_id}:message_history", number, link)
+
+    def get_user_submissions(self, group_id, user_id) -> Set[int]:
+        return {
+            int(num)
+            for num in self.redis.smembers(
+                f"group:{group_id}:user_submissions:{user_id}"
+            )
+        }
+
+    def add_user_submission(self, group_id, user_id, number) -> None:
+        self.redis.sadd(f"group:{group_id}:user_submissions:{user_id}", number)
+
+    def delete_for_group(self, group_id) -> None:
+        keys = self.redis.scan_iter(match=f"group:{group_id}:*")
+        for key in keys:
+            self.redis.delete(key)
+
+    def get_all_user_submissions(
+        self, group_id
+    ) -> Generator[tuple[str, Set[int]], None, None]:
+        for user_key in self.redis.scan_iter(
+            match=f"group:{group_id}:user_submissions:*"
+        ):
+            user_id = user_key.decode("utf-8").split(":")[3]
+            user_numbers = {int(num) for num in self.redis.smembers(user_key)}
+            yield (user_id, user_numbers)
 
 
-r = setup_redis()
+game_state = GameState()
+
 
 ####################
 # Command handlers #
@@ -78,17 +137,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     group_id = update.message.chat_id
     with MessageContext(logger, update.message):
         # Check if already initialized
-        channel_id = r.get(f"group:{group_id}:channel_id")
+        channel_id = game_state.get_channel_id(group_id)
         if channel_id:
             logger.info(
-                f"The game has already been initialized, ending the conversation."
+                "The game has already been initialized, ending the conversation."
             )
             await update.message.reply_text(
                 "The game has already been initialized for this group."
             )
             return ConversationHandler.END
 
-        logger.info(f"Starting the initialization for group {group_id}")
+        logger.info("Starting the initialization for group %d", group_id)
 
         await update.message.reply_text(
             "Please post the handler of the public channel that will be associated with this group.\n"
@@ -109,7 +168,7 @@ async def check_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> boo
             chat_member = await context.bot.get_chat_member(group_id, user_id)
             return chat_member.status in ["administrator", "creator"]
         except Exception as e:
-            logger.error(f"Error checking admin permissions: {e}")
+            logger.error("Error checking admin permissions: %s", e)
             return False
 
 
@@ -128,32 +187,32 @@ async def is_bot_admin_in_channel(
             await test_message.delete()
             return True
         except Exception as e:
-            logger.error(f"Bot admin check failed for channel {channel_id}: {e}")
+            logger.error("Bot admin check failed for channel %s: %s", channel_id, e)
             return False
 
 
 async def public_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Initialize the game with a public channel for posting submissions."""
     with MessageContext(logger, update.message):
-        logger.info(f"Initializing the game")
+        logger.info("Initializing the game")
 
         group_id = update.message.chat_id
         channel_id = update.message.text
 
         # Check if the channel exists and the bot is an admin of the channel
         try:
-            logger.info(f"Checking the channel {channel_id}")
+            logger.info("Checking the channel %s", channel_id)
             if not channel_id and not channel_id.startswith("@"):
                 raise Exception("The channel name is empty or does not start with @.")
             if not await is_bot_admin_in_channel(update, context, channel_id):
                 raise Exception("The bot must be an admin of the channel.")
         except Exception as e:
-            logger.error(f"Could not init the game: {e}")
+            logger.error("Could not init the game: %s", e)
             await update.message.reply_text(f"Could not start the bot: {e}")
             return ConversationHandler.END
 
-        r.set(f"group:{group_id}:channel_id", channel_id)
-        r.set(f"group:{group_id}:current_number", 1)
+        game_state.set_channel_id(group_id, channel_id)
+        game_state.set_current_number(group_id, 1)
 
         await update.message.reply_text(
             f"The channel {channel_id} has been associated with this group."
@@ -167,7 +226,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     with MessageContext(logger, update.message):
         user = update.message.from_user
 
-        logger.info(f"{user.username} canceled the initialization.")
+        logger.info("%s canceled the initialization.", user.username)
         await update.message.reply_text(
             "Initialization cancelled.", reply_markup=ReplyKeyboardRemove()
         )
@@ -189,31 +248,35 @@ async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Submit a number to be compared with the current number."""
     group_id = update.message.chat_id
     with MessageContext(logger, update.message):
+        # Check if the game has been initialized
+        channel_id = game_state.get_channel_id(group_id)
+        if not channel_id:
+            await update.message.reply_text(
+                "The game has not been initialized for this group."
+            )
+            return
         caption = update.message.caption
-        logger.info(f"Checking the submitted number, caption: {caption}")
+        logger.info("Checking the submitted number, caption: %s", caption)
         if caption:
             number_str = num_p.match(caption.strip())
             number = int(number_str.group(1)) if number_str else None
 
             # Check if the requested number is already submitted
-            already_existing_link = r.hget(f"group:{group_id}:message_history", number)
+            already_existing_link = game_state.get_submission_link(group_id, number)
             if already_existing_link:
-                already_existing_link = already_existing_link.decode("utf-8")
                 await update.message.reply_html(
                     f'Number {number} has already been <a href="{already_existing_link}">submitted</a>!'
                 )
                 return
 
             # Check if the number is correct
-            current_number = int(r.get(f"group:{group_id}:current_number"))
+            current_number = game_state.get_current_number(group_id)
             if number and number == current_number + 1:
                 # Store user submission in Redis set
-                user_key = (
-                    f"group:{group_id}:user_submissions:{update.message.from_user.id}"
+                game_state.add_user_submission(
+                    group_id, update.message.from_user.id, number
                 )
-                r.sadd(user_key, number)
                 # Prepare a message to post in the public channel
-                channel_id = r.get(f"group:{group_id}:channel_id").decode("utf-8")
                 posted_msg = await context.bot.send_photo(
                     chat_id=channel_id,
                     photo=update.message.photo[-1],
@@ -221,37 +284,38 @@ async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     parse_mode="MarkdownV2",
                 )
                 # Store message link in message history hash
-                r.hset(
-                    f"group:{group_id}:message_history", number, f"{posted_msg.link}"
-                )
+                game_state.set_submission_link(group_id, number, posted_msg.link)
                 # Increment and persist requested number if it's larger than the current number
                 logger.info(
-                    f"Updating the current number to {number}, was {current_number}"
+                    "Updating the current number to %d was %d.", number, current_number
                 )
-                r.set(f"group:{group_id}:current_number", number)
+                game_state.set_current_number(group_id, number)
 
                 await update.message.reply_markdown_v2(
                     f"🎉 [Found {number}]({posted_msg.link})\\! 🎉"
                 )
             else:
                 logger.error(
-                    f"The number is incorrect, expected {current_number + 1}, not {number}."
+                    "The number is incorrect, expected %d, not %d.",
+                    current_number + 1,
+                    number,
                 )
                 await update.message.reply_text(
                     f"Wrong number! Expected {current_number + 1}, not {number}."
                 )
         else:
             logger.error(
-                f"The caption is empty for message {update.message.message_id}"
+                "The caption is empty for message %d", update.message.message_id
             )
 
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Display the stats of the users who have submitted numbers."""
     group_id = update.message.chat_id
     with MessageContext(logger, update.message):
         try:
             # Check if the game has been initialized
-            channel_id = r.get(f"group:{group_id}:channel_id")
+            channel_id = game_state.get_channel_id(group_id)
             if not channel_id:
                 await update.message.reply_text(
                     "The game has not been initialized for this group."
@@ -260,11 +324,8 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
             # Fetch user stats
             user_stats = []
-            for key in r.scan_iter(match=f"group:{group_id}:user_submissions:*"):
-                user_id = key.decode("utf-8").split(":")[3]
-                logger.info(f"Collecting stats for user {user_id}")
-
-                user_numbers = {int(num) for num in r.smembers(key)}
+            for user_id, user_numbers in game_state.get_all_user_submissions(group_id):
+                logger.info("Collecting stats for user %s", user_id)
 
                 # Get the user's Telegram username (might have changed)
                 try:
@@ -275,16 +336,18 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         else f"User {user_id}"
                     )
                 except Exception as e:
-                    logger.error(f"Could not get the user info for user {user_id}: {e}")
+                    logger.error(
+                        "Could not get the user info for user %s, %s", user_id, e
+                    )
                     username = (
                         f"User {user_id}"  # Fallback if the username can't be retrieved
                     )
 
                 # Get the last submitted number and its link
                 last_number = max(user_numbers) if user_numbers else "N/A"
-                last_submission_link = r.hget(
-                    f"group:{group_id}:message_history", last_number
-                ).decode("utf-8")
+                last_submission_link = game_state.get_submission_link(
+                    group_id, last_number
+                )
 
                 # Add the user's stats
                 user_stats.append(
@@ -298,7 +361,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_html(f"📊 Stats by users:\n{user_stats_msg}")
 
         except Exception as e:
-            logger.error(f"Error fetching stats: {e}")
+            logger.error("Error fetching stats: %s", e)
             await update.message.reply_text("Could not show stats due to an error.")
 
 
@@ -308,21 +371,19 @@ async def info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     with MessageContext(logger, update.message):
         try:
             # Fetch the associated public channel
-            channel_id = r.get(f"group:{group_id}:channel_id")
+            channel_id = game_state.get_channel_id(group_id)
             if not channel_id:
                 await update.message.reply_text(
                     "The game has not been initialized for this group."
                 )
                 return
-            channel_id = channel_id.decode("utf-8")
             # Fetch the current number
-            current_number = int(r.get(f"group:{group_id}:current_number"))
+            current_number = game_state.get_current_number(group_id)
             # Fetch the latest submission's link
-            latest_submission_link = r.hget(
-                f"group:{group_id}:message_history", current_number
+            latest_submission_link = game_state.get_submission_link(
+                group_id, current_number
             )
             if latest_submission_link:
-                latest_submission_link = latest_submission_link.decode("utf-8")
                 await update.message.reply_markdown_v2(
                     f"💎 Last found number is **[{current_number}]({latest_submission_link})**\n\n"
                     f"📢 Group channel: {channel_id}"
@@ -334,11 +395,12 @@ async def info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
 
         except Exception as e:
-            logger.error(f"Error fetching info: {e}")
+            logger.error("Error fetching info: %s", e)
             await update.message.reply_text("Could not show info due to an error.")
 
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Reset the game for the group, removing everything associated with it."""
     group_id = update.message.chat_id
     user_id = update.message.from_user.id
 
@@ -347,33 +409,30 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             # Check permissions
             if not await check_admin(update, context):
                 logger.warning(
-                    f"User {user_id} attempted to reset without sufficient permissions."
+                    "User %d attempted to reset without sufficient permissions.",
+                    user_id,
                 )
                 await update.message.reply_text(
                     "You must be an admin to reset the game."
                 )
                 return
 
-            logger.info(f"Resetting the game for group {group_id} by user {user_id}.")
+            logger.info("Resetting the game for group %d by user %d", group_id, user_id)
 
             # Clear Redis keys for the group
-            r.delete(f"group:{group_id}:current_number")
-            r.delete(f"group:{group_id}:channel_id")
-            for key in r.scan_iter(match=f"group:{group_id}:user_submissions:*"):
-                r.delete(key)
-            r.delete(f"group:{group_id}:message_history")
+            game_state.delete_for_group(group_id)
 
             await update.message.reply_text("Game has been reset for this group.")
 
         except Exception as e:
-            logger.error(f"Error resetting the game: {e}")
+            logger.error("Error resetting the game: %s", e)
             await update.message.reply_text("Could not reset the game due to an error.")
 
 
 def main() -> None:
     """Start the bot."""
-    TOKEN = os.getenv("TOKEN")
-    app = ApplicationBuilder().token(TOKEN).build()
+    token = os.getenv("TOKEN")
+    app = ApplicationBuilder().token(token).build()
 
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
