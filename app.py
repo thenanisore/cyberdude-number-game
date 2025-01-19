@@ -138,7 +138,7 @@ async def help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-async def submit_number(message: Message, context: ContextTypes.DEFAULT_TYPE, requested_num: Optional[int]) -> None:
+async def submit_number(message: Message, context: ContextTypes.DEFAULT_TYPE, requested_num: Optional[int], user_id: str) -> None:
     """Submit a number and update the current number if necessary."""
     group_id = message.chat_id
     with MessageContext(logger, message):
@@ -150,7 +150,6 @@ async def submit_number(message: Message, context: ContextTypes.DEFAULT_TYPE, re
             return
         current_number = int(r.get(f"group:{message.chat_id}:current_number"))
         if requested_num and requested_num == current_number + 1:
-            user_id = message.from_user.id
             # Store user submission in Redis set
             user_key = f"group:{group_id}:user_submissions:{user_id}"
             r.sadd(user_key, requested_num)
@@ -184,7 +183,7 @@ async def submit_new_number(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if caption:
             requested_num = num_p.match(caption.strip())
             requested_num = int(requested_num.group(1)) if requested_num else None
-            await submit_number(update.message, context, requested_num)
+            await submit_number(update.message, context, requested_num, update.message.from_user.id)
         else:
             logger.error(f"The caption is empty for message {update.message.message_id}")
 
@@ -194,6 +193,7 @@ async def submit_existing_number(update: Update, context: ContextTypes.DEFAULT_T
     with MessageContext(logger, update.message):
         try:
             number = int(context.args[0])
+            original_user = context.args[1]
             logger.info(f"Trying to sumbit existing number {number}")
             # Check if the message contains a photo or video
             if not update.message.reply_to_message:
