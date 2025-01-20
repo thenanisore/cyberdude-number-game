@@ -6,6 +6,10 @@ The game is happening inside a Telegram group and also require a separate public
 
 The bot must be an administrator in both the group and the channel to work correctly.
 
+## Rules of the Game
+
+Participants find and submit numbers from real-life objects by sending a photo with a caption like `42!`. Numbers must be submitted in natural order; the first number is 1, so the players are looking for 2. Other participants decide for themselves whether the photo is a valid submission, as the bot doesn't use OCR for validation. It is up to the group members how they want to play it.
+
 ## Features
 - **Photo Submission**: Players submit numbers by sending photos with captions like `123!`.
 - **Automatic Validation**: Ensures the numbers are submitted in ascending order.
