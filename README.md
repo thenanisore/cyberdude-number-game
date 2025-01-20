@@ -6,15 +6,11 @@ The game is happening inside a Telegram group and also require a separate public
 
 The bot must be an administrator in both the group and the channel to work correctly.
 
----
-
 ## Features
 - **Photo Submission**: Players submit numbers by sending photos with captions like `123!`.
 - **Automatic Validation**: Ensures the numbers are submitted in ascending order.
 - **Statistics**: Tracks and displays user submissions.
 - **Multi-group Support**: The bot can manage games across multiple groups and channels.
-
----
 
 ## Commands
 
@@ -27,9 +23,7 @@ The bot must be an administrator in both the group and the channel to work corre
 ### Admin Commands
 - `/reset` - Reset the game for the group.
 
----
-
-## Installation 🖥️
+## Installation
 
 ### Prerequisites
 - Python 3.8+
@@ -69,9 +63,7 @@ The bot must be an administrator in both the group and the channel to work corre
    python app.py
    ```
 
----
-
-## Usage 🎮
+## Usage
 
 1. Add the bot to your group and make it an admin.
 2. Create a public channel which will serve as the game history. Add the bot as an admin.
@@ -79,8 +71,6 @@ The bot must be an administrator in both the group and the channel to work corre
 4. Participants submit photos with captions like `123!` in ascending order.
 5. Use `/stats` to view leaderboards and `/info` for the latest submission.
 
----
-
-## License 📜
+## License
 
 This project is licensed under the MIT License. See the `LICENSE` file for details.
