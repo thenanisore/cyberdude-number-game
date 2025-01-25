@@ -292,7 +292,8 @@ async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 game_state.set_current_number(group_id, number)
 
                 await update.message.reply_markdown_v2(
-                    f"🎉 [Found {number}]({posted_msg.link})\\! 🎉"
+                    f"🎉 [Found {number}]({posted_msg.link})\\! 🎉",
+                    disable_web_page_preview=True,
                 )
             else:
                 logger.error(
